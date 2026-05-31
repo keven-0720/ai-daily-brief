@@ -1,4 +1,4 @@
 feedparser==6.0.11
 yfinance
-google-generativeai
+google-genai
 requests==2.31.0
