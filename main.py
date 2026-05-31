@@ -14,7 +14,7 @@ if not api_key:
 # 初始化新版客户端
 client = genai.Client(api_key=api_key)
 # 采用当前最新稳定且免费的模型
-MODEL_NAME = 'gemini-2.0-flash' 
+MODEL_NAME = 'gemini-2.5-flash' 
 
 # 2. 数据获取函数 (保持不变)
 def get_news():
@@ -33,7 +33,7 @@ def get_news():
     return news_items
 
 def get_stocks():
-    tickers = ["NVDA", "MSFT", "GOOG"]
+    tickers = ["NVDA", "MSFT", "GOOG", "MU", "DELL"]
     stock_data = []
     for ticker in tickers:
         try:
