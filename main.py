@@ -1,30 +1,32 @@
 import os
+import json
 import datetime
 import feedparser
 import yfinance as yf
-import google.generativeai as genai
+from google import genai # 使用全新 SDK
 
 # 1. 初始化设置
 DATE_STR = datetime.datetime.now().strftime("%Y-%m-%d")
-# 获取 API Key，未获取到则中止运行
 api_key = os.environ.get('GEMINI_API_KEY')
 if not api_key:
     raise ValueError("未找到 GEMINI_API_KEY 环境变量，请检查 GitHub Secrets 配置。")
 
-genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-1.5-flash-latest')
+# 初始化新版客户端
+client = genai.Client(api_key=api_key)
+# 采用当前最新稳定且免费的模型
+MODEL_NAME = 'gemini-2.0-flash' 
 
-# 2. 数据获取函数
+# 2. 数据获取函数 (保持不变)
 def get_news():
     feeds = [
         "https://techcrunch.com/category/artificial-intelligence/feed/",
-        "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19854910" # 科技新闻备用源
+        "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=19854910"
     ]
     news_items = []
     for url in feeds:
         try:
             parsed = feedparser.parse(url)
-            for entry in parsed.entries[:3]: # 每个源取前3条，避免超载
+            for entry in parsed.entries[:3]:
                 news_items.append({"title": entry.title, "link": entry.link})
         except Exception as e:
             print(f"获取 RSS 失败 ({url}): {e}")
@@ -36,10 +38,10 @@ def get_stocks():
     for ticker in tickers:
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="2d")
+            hist = stock.history(period="5d") # 使用5天以防周末停盘
             if len(hist) >= 2:
-                prev_close = hist['Close'].iloc[0]
-                curr_close = hist['Close'].iloc[1]
+                prev_close = hist['Close'].iloc[-2]
+                curr_close = hist['Close'].iloc[-1]
                 change = ((curr_close - prev_close) / prev_close) * 100
                 stock_data.append({
                     "name": ticker,
@@ -47,63 +49,90 @@ def get_stocks():
                     "change": f"{change:+.2f}%"
                 })
         except Exception as e:
-            print(f"获取股票数据失败 ({ticker}): {e}")
+            print(f"获取股票数据异常 ({ticker}): {e}")
     return stock_data
 
 def get_macro_calendar():
-    # 硬编码简易宏观日历，预留后续扩展空间
     return [
         {"event": "美联储利率决议", "status": "本周无"},
         {"event": "美国非农就业数据", "status": "本周无"},
         {"event": "美国 CPI 数据", "status": "本周无"}
     ]
 
-# 3. AI 处理函数
+# 3. AI 处理函数 (核心重构区)
 def analyze_news(news_items):
     analyzed_news = []
     for item in news_items:
         try:
-            prompt = (
-                f"请分析这条新闻标题：'{item['title']}'。\n"
-                "1. 评估其对科技/AI行业的重要程度，必须严格输出：🔴高 或 🟡中 或 🟢低。\n"
-                "2. 提供50字以内的中文客观摘要，保持审慎中性的风格。\n"
-                "格式要求：[重要程度] 摘要内容"
+            # 采用强约束的 JSON Prompt
+            prompt = f"""
+请分析这条新闻标题：'{item['title']}'。
+请评估其对科技/AI行业的重要程度，并给出50字以内中文摘要，保持审慎中性的风格。
+请严格仅返回以下 JSON 格式（不要输出任何其他内容）：
+{{
+  "level": "🔴高", // 只能在 🔴高, 🟡中, 🟢低 中选一
+  "summary": "你的摘要内容"
+}}
+"""
+            # 新版接口调用方式
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt
             )
-            response = model.generate_content(prompt)
-            result_text = response.text.strip()
             
-            # 简单解析返回结果
-            level = "🟡中" # 默认值
-            if "🔴高" in result_text: level = "🔴高"
-            elif "🟢低" in result_text: level = "🟢低"
+            # 安全提取文本：防范抛错
+            if hasattr(response, "text") and response.text:
+                result_text = response.text.strip()
+            else:
+                result_text = str(response)
+                
+            # 清理 AI 有时附带的 Markdown 代码块标记
+            if result_text.startswith("```json"):
+                result_text = result_text[7:-3].strip()
+            elif result_text.startswith("```"):
+                result_text = result_text[3:-3].strip()
+                
+            # 解析 JSON
+            try:
+                data = json.loads(result_text)
+                level = data.get("level", "🟡中")
+                summary = data.get("summary", "未能生成摘要。")
+            except Exception as parse_err:
+                print(f"JSON 解析失败: {parse_err}, 原始文本: {result_text}")
+                level = "🟡中"
+                summary = result_text.replace("\n", " ") # 降级处理，直接取文本
             
-            summary = result_text.split("]", 1)[-1].strip() if "]" in result_text else result_text
-            
+            # 数据校验
+            if "高" in level: level = "🔴高"
+            elif "低" in level: level = "🟢低"
+            else: level = "🟡中"
+
             analyzed_news.append({
                 "title": item['title'],
                 "link": item['link'],
                 "level": level,
                 "summary": summary
             })
+            
         except Exception as e:
-            print(f"AI 处理新闻失败 ({item['title']}): {e}")
+            print(f"AI 处理新闻异常 ({item['title']}): {e}")
             analyzed_news.append({
                 "title": item['title'],
                 "link": item['link'],
                 "level": "⚪未知",
-                "summary": "处理时发生系统读取错误。"
+                "summary": "接口响应异常，未能完成解析。"
             })
             
-    # 按重要程度排序（🔴高 -> 🟡中 -> 🟢低 -> ⚪未知）
+    # 排序逻辑
     sort_order = {"🔴高": 1, "🟡中": 2, "🟢低": 3, "⚪未知": 4}
     analyzed_news.sort(key=lambda x: sort_order.get(x['level'], 5))
     return analyzed_news
 
-# 4. 生成 HTML 报告
+# 4. 生成 HTML 报告 (保持不变)
 def generate_html(news, stocks, calendar):
     top_news = [n for n in news if n['level'] == "🔴高"][:3]
     if not top_news:
-        top_news = news[:3] # 若无高优新闻，则取前三条
+        top_news = news[:3]
 
     html_content = f"""
     <!DOCTYPE html>
@@ -173,15 +202,12 @@ if __name__ == "__main__":
     print("生成并保存报告...")
     html_output = generate_html(analyzed_news, stock_data, calendar_data)
     
-    # 确保目录存在
     os.makedirs("report", exist_ok=True)
     
-    # 保存每日独立报告
     report_path = f"report/{DATE_STR}.html"
     with open(report_path, "w", encoding="utf-8") as f:
         f.write(html_output)
         
-    # 覆盖 index.html 以供 GitHub Pages 默认展示最新内容
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html_output)
         
