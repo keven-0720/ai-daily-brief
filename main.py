@@ -12,7 +12,7 @@ if not api_key:
     raise ValueError("未找到 GEMINI_API_KEY 环境变量，请检查 GitHub Secrets 配置。")
 
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-1.5-flash') # 使用最新免费且快速的模型
+model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
 # 2. 数据获取函数
 def get_news():
